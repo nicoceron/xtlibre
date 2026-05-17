@@ -30,6 +30,87 @@ import { DeviceProvider } from "@/contexts/device-context"
 import { toast } from "sonner"
 import { getPatternForLang, drawProgressIndicator } from "@/lib/progress-bar"
 
+function getProgressAreaHeight(settings: Settings) {
+  if (!settings.enableProgressBar) return 0
+
+  const edgeM = settings.progressEdgeMargin || 0
+  const hasBoth = settings.showProgressLine && settings.showChapterProgress
+  const hasLine = settings.showProgressLine || settings.showChapterProgress
+  let ph = PROGRESS_BAR_HEIGHT
+  if (settings.showChapterMarks || (settings.progressFullWidth && hasBoth)) ph = PROGRESS_BAR_HEIGHT_EXTENDED
+  else if (settings.progressFullWidth && hasLine) ph = PROGRESS_BAR_HEIGHT_FULLWIDTH
+
+  return ph + edgeM
+}
+
+function centerCoverImageData(imageData: ImageData, settings: Settings, width: number, height: number) {
+  const data = imageData.data
+  let minX = width
+  let minY = height
+  let maxX = -1
+  let maxY = -1
+  let darkPixelCount = 0
+
+  for (let y = 0; y < height; y++) {
+    const rowOffset = y * width * 4
+    for (let x = 0; x < width; x++) {
+      const i = rowOffset + x * 4
+      if (data[i + 3] < 16) continue
+
+      const luma = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]
+      if (luma >= 245) continue
+
+      darkPixelCount++
+      if (x < minX) minX = x
+      if (x > maxX) maxX = x
+      if (y < minY) minY = y
+      if (y > maxY) maxY = y
+    }
+  }
+
+  if (maxY < 0) return
+
+  const boxW = maxX - minX + 1
+  const boxH = maxY - minY + 1
+  if (
+    darkPixelCount < width * height * 0.04 ||
+    boxW < width * 0.35 ||
+    boxH < height * 0.35 ||
+    boxH > height * 0.98
+  ) {
+    return
+  }
+
+  const reservedTop = settings.progressPosition === "top" ? getProgressAreaHeight(settings) : 0
+  const reservedBottom = settings.progressPosition === "bottom" ? getProgressAreaHeight(settings) : 0
+  const contentTop = reservedTop
+  const contentBottom = height - reservedBottom
+  const contentHeight = Math.max(0, contentBottom - contentTop)
+  if (boxH >= contentHeight) return
+
+  const targetTop = Math.round(contentTop + (contentHeight - boxH) / 2)
+  const dy = targetTop - minY
+
+  if (Math.abs(dy) < 2) return
+
+  const source = new Uint8ClampedArray(data)
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] = 255
+    data[i + 1] = 255
+    data[i + 2] = 255
+    data[i + 3] = 255
+  }
+
+  const rowBytes = width * 4
+  for (let y = 0; y < height; y++) {
+    const destY = y + dy
+    if (destY < 0 || destY >= height) continue
+    const sourceStart = y * rowBytes
+    const destStart = destY * rowBytes
+    data.set(source.subarray(sourceStart, sourceStart + rowBytes), destStart)
+  }
+}
+
 export function Converter({
   initialTab, initialSettings, initialFonts, opdsUrl,
 }: {
@@ -213,6 +294,10 @@ export function Converter({
     const imageData = ctx.createImageData(sw, sh)
     for (let i = 0; i < buffer.length; i++) imageData.data[i] = buffer[i]
 
+    const curPage = ren.getCurrentPage()
+    const totalPages = ren.getPageCount()
+    if (curPage === 0) centerCoverImageData(imageData, settings, sw, sh)
+
     const isHQ = settings.qualityMode === "hq"
     const bits = isHQ ? 2 : 1
     if (settings.enableDithering) {
@@ -227,8 +312,6 @@ export function Converter({
 
     ctx.putImageData(imageData, 0, 0)
 
-    const curPage = ren.getCurrentPage()
-    const totalPages = ren.getPageCount()
     drawProgressIndicator(ctx, settings, curPage, totalPages, sw, sh, tocRef.current)
 
     setPage(curPage)
@@ -799,6 +882,7 @@ export function Converter({
         const buffer = ren.getFrameBuffer()
         const imageData = tempCtx.createImageData(sw, sh)
         imageData.data.set(buffer)
+        if (pg === 0) centerCoverImageData(imageData, settings, sw, sh)
         tempCtx.putImageData(imageData, 0, 0)
 
         if (settings.enableDithering) {
